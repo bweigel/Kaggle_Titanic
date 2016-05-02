@@ -1,0 +1,225 @@
+---
+title: "Kaggle Titanic"
+author: "bweigel"
+date: "April 29, 2016"
+output:
+  knitrBootstrap::bootstrap_document:
+    theme.chooser: TRUE
+    highlight.chooser: TRUE
+---
+
+# So Kaggle ... #
+
+This is my first attempt at Kaggle. I have registered some time ago, but never rwally got around to doing an y work. Mainly because I cannot really motivate to do something that seems more like a chore, than fun. Anyway, when I first looked at the Titanic dataset I though: "This should be straight-forward." And since I had done some basic data sciency stuff and I had also taken the course of Trevor Hastie and ? Tibshiriana I just couldn't motivate myself to actially start working.
+So here we go.
+
+```{r knitrOptions, cache=FALSE}
+library(knitr)
+opts_chunk$set(message=F, error=T, warning = F, echo=F, dev='CairoSVG')
+```
+
+```{r prerequesites}
+library(dplyr)
+library(magrittr)
+library(data.table)
+library(ggplot2)
+# function for plotting barplots according to results of an aggreate function
+# input is the same as aggregate()
+# returns a function, where the axis labels can be changed through the parameters xlab, ylab, main
+barplot0 <- function(...){
+  df <- aggregate(...)
+  return(function(main=NULL, xlab=NULL, ylab=NULL){
+    xlab <- ifelse(is.null(xlab), names(df)[1], xlab)
+    ylab <- ifelse(is.null(ylab), names(df)[2], ylab)
+    main <- ifelse(is.null(main), NA, main)
+    barplot(height = df[,2], names.arg = df[,1]%>%as.character(),  xlab = xlab, ylab=ylab)
+  })
+}
+
+
+multinom0 <- function(formula, data, k, ...){
+  nObs <- nrow(data)
+  k <- 6
+  Obs <- 1:nObs
+  
+  for(i in 1:k){
+    if(i == k) tmp_samples <- Obs
+    else tmp_samples <- sample(Obs, round(nObs/k,0))
+    
+    if(!exists("sets")) sets <- list(list(validation = tmp_samples, 
+                                     model = multinom(formula=formula, data = data, ...)))
+    else sets <- append(sets, list(list(validation = tmp_samples,
+                                   model = multinom(formula=formula, data = data, ...))))
+    
+    Obs <- Obs[match(Obs,tmp_samples) %>% is.na]
+  }
+  
+  outPut <- function(...){
+    if(length(list(...)) == 0) return(list(overallErr = NA, Err = NA, models = sets))
+    else {
+      
+      return(list(overallErr = mean(errors), Err = errors, models = sets))
+    }
+  }
+  return(outPut)
+}
+
+```
+
+# The dataset #
+
+Loading the dataset at first is a good idea. 
+There are 13 columns in the data: 
+
+ - PassengerID:   Just a unique number                                                [Int]
+ - Survived:      did the passanger survive? yes:1/no:0                               (boolean)
+ - PClass:        Passenger Class (1 - 3)                                             (categorical)
+ - Name:          Passenger Name
+ - Sex:           male/female                                                         (categorical)
+ - Age:           Passenger Age                                                       [float] (should be int, but estimated ages are in xx.5 form)
+ - SibSp:         Number of siblings/spouses aboard                                   [int]
+ - ParchA:        Number of parents/children aboard                                   [int]
+ - Ticket:        Ticket number                                                       [string]
+ - Fare:          Passenger Fare                                                      [float]
+ - Cabin:         Number of the cabin the passener was in                             [string]
+ - and Embarked:  Port of Embarkation (C = Cherbourg; Q = Queenstown; S = Southampton) [categorical]
+ 
+ 
+## Descriptive Statistics on the dataset ##
+ 
+ A quick `summary()` of the dataframe gives some hints about the dataset.
+ 
+```{r load-dataset}
+df <- read.csv("data/train.csv", stringsAsFactors = F, header=T, na.strings = "")
+summary(df)
+```
+
+The mean of Survived shows at first sight, that from this set over 60% of the passengers perished in the cold north atlantic waters. Only 38.4% of the passengers survived. For convenience I will set the Survived column to the corresponding logical value (`TRUE` or `FALSE`).
+
+```{r}
+# treat categorical variables as such
+df <- df %>% mutate(Survived = as.logical(Survived),
+                    Pclass = factor(Pclass, levels = 1:3, labels = c("1st", "2nd", "3rd")),
+                    Sex = factor(Sex, levels = unique(Sex), labels = unique(Sex)),
+                    Embarked = factor(Embarked, levels = c("S", "C", "Q"), labels = c("S. Hampton", "Cherbourg", "Queenstown")))
+# set missing values NA
+
+```
+
+Some (not-so-)fun facts about the data (in text format):
+
+```{r, echo=F, eval=FALSE}
+aggregate(Survived ~ Sex, df, mean)  # how much of the passengers of each class sußrvived?
+aggregate(Survived ~ Pclass, df, mean)  # how much of the passengers of each class sußrvived?
+aggregate(Age ~ Pclass, df, mean)  # average age in each class
+aggregate(Survived ~ Embarked, df, mean)  # how much of the passengers vurvived depending on the city of embarkemnt?
+aggregate(Sex ~ Pclass, df, function(x){ifelse(x == "male", 1, 0) %>% mean()})  # amount of males in each class 
+
+aggregate(Fare ~ Survived, df, mean)    # how much fare did the average survivor pay?
+```
+
+```{r descriptive, echo=F, fig.height=6, fig.width=8}
+par(mfrow=c(2,2))
+barplot0(Age ~ Survived, df, mean)()
+barplot0(Survived ~ Sex, df, mean)()
+barplot0(Survived ~ Embarked, df, mean)()
+barplot0(Survived ~ Pclass, df, mean)(xlab="Passenger Class")
+barplot0(Age ~ Pclass, df, mean)(ylab="Avg. Age", xlab="Passenger Class")
+barplot0(Sex ~ Pclass, df, function(x){ifelse(x == "male", 1, 0) %>% mean()})(ylab="male passengers", xlab="Passenger Class")
+barplot0(Fare ~Survived, df, mean)()
+barplot0(Survived ~ Embarked, df, mean)()
+```
+
+## Missing values ##
+
+There are 687 NAs in _Cabin_, 177 in _Age_ and 2 in _Embarked_. Since so much data is missing from the Cabin column it is removed. `r is.na(df) %>% colSums`.
+
+```{r removeCabin}
+df <- select(df, -Cabin)
+```
+
+The Age column raises some concern, since there are 177 missing values (`NA`). So lets first take a look at all the rows, where there is no age.
+ 
+```{r}
+df[which(is.na(df$Age)),] %>% summary
+# Full dataset
+df %>% summarise(Survived=mean(Survived),
+                                        percent.male=mean(ifelse(Sex=="male",1,0)),
+                                        Pclass = mean(Pclass),
+                                        Fare = mean(Fare),
+                                        SibSp = mean(SibSp),
+                                        Parch = mean(Parch))
+# Only passengers without age
+df[which(is.na(df$Age)),] %>% summarise(Survived=mean(Survived),
+                                        percent.male=mean(ifelse(Sex=="male",1,0)),
+                                        Pclass = mean(Pclass),
+                                        Fare = mean(Fare),
+                                        SibSp = mean(SibSp),
+                                        Parch = mean(Parch))
+```
+
+The mortality of the passengers without an age is 10% higher than the average mortality (71% vs 62%). Also it seems that passengers w/o age were mostly in the lower classes 2 and 3 (avg class 2.6), male (70%) with rather cheap tickets (22 pounds) and were travelling without parents or children.
+
+## Feature engineering ##
+
+```{r featureNames}
+library(stringr)
+
+df <- df %>% mutate(Title = str_extract(Name, ",[ ]?[[:alpha:].]+") %>% str_extract(., "[[:alpha:]]+"),
+              Surname = str_extract(Name, "[[:alpha:]']+"))
+
+df$Title <- factor(df$Title)
+```
+
+```{r featureAgegroup, message=FALSE, results='hide'}
+ageLev <- c(0,1,3,10,15,25,50,100)
+ageLab <- c("Infant", "Toddler", "Child", "Teenager", "Young Adult", "Mid-Aged", "Elderly")
+# split Age into age-groups
+df$AgeGroup <- cut(df$Age, breaks=ageLev, labels = ageLab, ordered_result = T)
+
+#barplot0(Survived ~ AgeGroup, df, mean)()
+#barplot0(Pclass ~ AgeGroup, df, mean)()
+
+#################################################
+################predict agegroup#################
+#################################################
+library(nnet)
+# Single out the data were we have an Age
+df_Age <- df[which(!is.na(df$Age)),]
+# split data into train and test set
+n_Row <- nrow(df_Age)
+sample_Age <- sample(n_Row, size = n_Row*0.6, replace = F)
+df_Age_train <- df_Age[sample_Age,]
+df_Age_test <- df_Age[-sample_Age,]
+#ageMod1 <- multinom(AgeGroup ~ Pclass+Parch+SibSp+Fare+Title, data = df_Age_train) # this doesnt work yet, because the feature 'Titles' has some faults
+ageMod1 <- multinom(AgeGroup ~ Pclass+Parch+SibSp+Fare+Sex, data = df_Age_train) # without the 'Title' feature
+
+#### K-Fold CV ####
+
+# reduce model complexity with step()
+ageMod2 <- step(ageMod1)
+
+# predict new data from test set
+newY <- predict(ageMod1, newdata = df_Age_test)
+newY <- factor(newY, levels = ageLab, labels = ageLab, ordered = T)
+```
+
+
+```{r ageGroupModelAssesment}
+library(pROC)
+# confusion matrix
+confMat <- table(df_Age_test$AgeGroup, newY)
+knitr::kable(confMat)
+# Overall Agreement of Classification
+agree <- diag(confMat)/sum(confMat)
+kable(agree)
+
+# ROC Curves
+
+ROC <- multiclass.roc(df_Age_test$AgeGroup, newY, )
+par(mfrow=c(2,2))
+lapply(ROC$rocs, FUN = plot)
+```
+
+The overall true positive rate is `r round(sum(agree), 4)`, or `r round(sum(agree)*100, 2)`%.
+
