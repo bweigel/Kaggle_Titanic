@@ -39,27 +39,34 @@ barplot0 <- function(...){
 
 multinom0 <- function(formula, data, k, ...){
   nObs <- nrow(data)
-  k <- 6
   Obs <- 1:nObs
   
   for(i in 1:k){
     if(i == k) tmp_samples <- Obs
     else tmp_samples <- sample(Obs, round(nObs/k,0))
     
-    if(!exists("sets")) sets <- list(list(validation = tmp_samples, 
-                                     model = multinom(formula=formula, data = data, ...)))
-    else sets <- append(sets, list(list(validation = tmp_samples,
-                                   model = multinom(formula=formula, data = data, ...))))
+    if(!exists("sets")) sets <- list(data[tmp_samples,])
+    else sets <- append(sets, list(data[tmp_samples,]))
     
     Obs <- Obs[match(Obs,tmp_samples) %>% is.na]
   }
   
-  outPut <- function(...){
-    if(length(list(...)) == 0) return(list(overallErr = NA, Err = NA, models = sets))
-    else {
+  outPut <- function(predictor, ...){
+    for(i in 1:length(sets)){
+      train_tmp <- rbindlist(sets[-i])
+      test_tmp <- sets[[i]]
+      model <- multinom(formula=formula, data = train_tmp, ...)
+      #model <- step(model, trace = 0)
+      newY <- predict(model, newdata = test_tmp)
       
-      return(list(overallErr = mean(errors), Err = errors, models = sets))
+      TMP <- substitute(select(test_tmp, X), list(X = as.name(predictor))) %>% eval %>% unlist
+      confMat <- table(TMP, newY)
+      
+      if(!exists("results")) results <- sum(diag(confMat)/sum(confMat))
+      else results <- append(results, sum(diag(confMat)/sum(confMat)))
     }
+     
+    return(results)
   }
   return(outPut)
 }
