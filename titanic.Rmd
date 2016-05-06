@@ -21,6 +21,7 @@ opts_chunk$set(message=F, error=T, warning = F, echo=F, dev='CairoSVG')
 ```{r prerequesites}
 library(dplyr)
 library(magrittr)
+library(pROC)
 library(data.table)
 library(ggplot2)
 # function for plotting barplots according to results of an aggreate function
@@ -36,33 +37,6 @@ barplot0 <- function(...){
   })
 }
 
-
-multinom0 <- function(formula, data, k, ...){
-  nObs <- nrow(data)
-  k <- 6
-  Obs <- 1:nObs
-  
-  for(i in 1:k){
-    if(i == k) tmp_samples <- Obs
-    else tmp_samples <- sample(Obs, round(nObs/k,0))
-    
-    if(!exists("sets")) sets <- list(list(validation = tmp_samples, 
-                                     model = multinom(formula=formula, data = data, ...)))
-    else sets <- append(sets, list(list(validation = tmp_samples,
-                                   model = multinom(formula=formula, data = data, ...))))
-    
-    Obs <- Obs[match(Obs,tmp_samples) %>% is.na]
-  }
-  
-  outPut <- function(...){
-    if(length(list(...)) == 0) return(list(overallErr = NA, Err = NA, models = sets))
-    else {
-      
-      return(list(overallErr = mean(errors), Err = errors, models = sets))
-    }
-  }
-  return(outPut)
-}
 
 ```
 
@@ -160,6 +134,68 @@ df[which(is.na(df$Age)),] %>% summarise(Survived=mean(Survived),
 
 The mortality of the passengers without an age is 10% higher than the average mortality (71% vs 62%). Also it seems that passengers w/o age were mostly in the lower classes 2 and 3 (avg class 2.6), male (70%) with rather cheap tickets (22 pounds) and were travelling without parents or children.
 
+# Simple logistic regression #
+
+At first I'll try a simple logistic regression and leave out any rows that contain `NA` values.
+
+```{r}
+#remove rows with NA values
+dfWork <- df[!(is.na(df) %>% rowSums() %>% as.logical), ]
+
+# split into train and test set
+samples <- sample(nrow(dfWork), size = 0.6*nrow(dfWork))
+dfWork_train <- dfWork[samples,]
+dfWork_test <- dfWork[-samples,]
+
+# perform simple logistic regression
+logMod1 <- glm(Survived ~ ., family = binomial(link = "logit"), data = dfWork_train)
+```
+
+Unsurprisingly this simple approach doesn't work. The algorithm doesn't converge.
+Let's fiddle around with the formula a bit.
+
+```{r}
+set.seed(1337)  
+# simpler model
+logMod1 <- glm(Survived ~ Pclass + Age + Sex + SibSp + Parch + Fare, family = binomial(link = "logit"), data = dfWork_train)
+
+# seems like Parch and Fare are not significant as parameters for prediction
+summary(logMod1)
+
+# simplify model using step()
+logMod2 <- step(logMod1)
+summary(logMod2)
+# as expected Parch and Fare are dropped
+```
+
+Now let's check the performance of our new model on te test set.
+
+```{r}
+# predict outcome
+newY <- predict(logMod2, newdata = dfWork_test, type = "response")
+dfAnalyze <- cbind(dfWork_test, SurvPred=newY) # this is for plotting later on
+# compare prediction and actual values in confudion table
+newY <- ifelse(newY <= 0.5, F, T)
+confMat <- table(dfWork_test$Survived, newY)
+knitr::kable(confMat)
+confMat <- confMat/sum(confMat)
+knitr::kable(confMat/sum(confMat))
+```
+
+This simple logistic regression model already does a reasonable well job of predicting the right outcome.
+It classifies `r round((diag(confMat) %>% sum)*100,  2) `% of all cases into the right group.
+
+```{r plotResultsLogMod}
+ggplot(dfAnalyze %>% filter(SibSp == 0), aes(x = Age, y = SurvPred, color=Pclass, shape=Sex)) + 
+  geom_point()  +
+  geom_line() +
+  labs(y="Predicted probability of Survival")
+```
+
+
+
+
+
 ## Feature engineering ##
 
 ```{r featureNames}
@@ -168,6 +204,7 @@ library(stringr)
 df <- df %>% mutate(Title = str_extract(Name, ",[ ]?[[:alpha:].]+") %>% str_extract(., "[[:alpha:]]+"),
               Surname = str_extract(Name, "[[:alpha:]']+"))
 
+#df$Title[which(df$Title)]
 df$Title <- factor(df$Title)
 ```
 
