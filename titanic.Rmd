@@ -33,11 +33,12 @@ barplot0 <- function(...){
     ylab <- ifelse(is.null(ylab), names(df)[2], ylab)
     main <- ifelse(is.null(main), NA, main)
     barplot(height = df[,2], names.arg = df[,1]%>%as.character(),  xlab = xlab, ylab=ylab)
-  })
-}
+    })
+  }
 
 
 multinom0 <- function(formula, data, k, ...){
+  set.seed(1337)
   nObs <- nrow(data)
   Obs <- 1:nObs
   
@@ -49,14 +50,14 @@ multinom0 <- function(formula, data, k, ...){
     else sets <- append(sets, list(data[tmp_samples,]))
     
     Obs <- Obs[match(Obs,tmp_samples) %>% is.na]
-  }
+    }
   
   outPut <- function(predictor, ...){
     for(i in 1:length(sets)){
       train_tmp <- rbindlist(sets[-i])
       test_tmp <- sets[[i]]
       model <- multinom(formula=formula, data = train_tmp, ...)
-      #model <- step(model, trace = 0)
+      #model <- step(model, trace = 0) # this doent work here
       newY <- predict(model, newdata = test_tmp)
       
       TMP <- substitute(select(test_tmp, X), list(X = as.name(predictor))) %>% eval %>% unlist
@@ -64,12 +65,12 @@ multinom0 <- function(formula, data, k, ...){
       
       if(!exists("results")) results <- sum(diag(confMat)/sum(confMat))
       else results <- append(results, sum(diag(confMat)/sum(confMat)))
+      }
+    
+    return(results) # return vector with correct predictions
     }
-     
-    return(results)
-  }
   return(outPut)
-}
+  }
 
 ```
 
@@ -78,24 +79,24 @@ multinom0 <- function(formula, data, k, ...){
 Loading the dataset at first is a good idea. 
 There are 13 columns in the data: 
 
- - PassengerID:   Just a unique number                                                [Int]
- - Survived:      did the passanger survive? yes:1/no:0                               (boolean)
- - PClass:        Passenger Class (1 - 3)                                             (categorical)
- - Name:          Passenger Name
- - Sex:           male/female                                                         (categorical)
- - Age:           Passenger Age                                                       [float] (should be int, but estimated ages are in xx.5 form)
- - SibSp:         Number of siblings/spouses aboard                                   [int]
- - ParchA:        Number of parents/children aboard                                   [int]
- - Ticket:        Ticket number                                                       [string]
- - Fare:          Passenger Fare                                                      [float]
- - Cabin:         Number of the cabin the passener was in                             [string]
- - and Embarked:  Port of Embarkation (C = Cherbourg; Q = Queenstown; S = Southampton) [categorical]
- 
- 
+- PassengerID:   Just a unique number                                                [Int]
+- Survived:      did the passanger survive? yes:1/no:0                               (boolean)
+- PClass:        Passenger Class (1 - 3)                                             (categorical)
+- Name:          Passenger Name
+- Sex:           male/female                                                         (categorical)
+- Age:           Passenger Age                                                       [float] (should be int, but estimated ages are in xx.5 form)
+- SibSp:         Number of siblings/spouses aboard                                   [int]
+- ParchA:        Number of parents/children aboard                                   [int]
+- Ticket:        Ticket number                                                       [string]
+- Fare:          Passenger Fare                                                      [float]
+- Cabin:         Number of the cabin the passener was in                             [string]
+- and Embarked:  Port of Embarkation (C = Cherbourg; Q = Queenstown; S = Southampton) [categorical]
+
+
 ## Descriptive Statistics on the dataset ##
- 
- A quick `summary()` of the dataframe gives some hints about the dataset.
- 
+
+A quick `summary()` of the dataframe gives some hints about the dataset.
+
 ```{r load-dataset}
 df <- read.csv("data/train.csv", stringsAsFactors = F, header=T, na.strings = "")
 summary(df)
@@ -146,16 +147,16 @@ df <- select(df, -Cabin)
 ```
 
 The Age column raises some concern, since there are 177 missing values (`NA`). So lets first take a look at all the rows, where there is no age.
- 
+
 ```{r}
 df[which(is.na(df$Age)),] %>% summary
 # Full dataset
 df %>% summarise(Survived=mean(Survived),
-                                        percent.male=mean(ifelse(Sex=="male",1,0)),
-                                        Pclass = mean(Pclass),
-                                        Fare = mean(Fare),
-                                        SibSp = mean(SibSp),
-                                        Parch = mean(Parch))
+                 percent.male=mean(ifelse(Sex=="male",1,0)),
+                 Pclass = mean(Pclass),
+                 Fare = mean(Fare),
+                 SibSp = mean(SibSp),
+                 Parch = mean(Parch))
 # Only passengers without age
 df[which(is.na(df$Age)),] %>% summarise(Survived=mean(Survived),
                                         percent.male=mean(ifelse(Sex=="male",1,0)),
@@ -173,12 +174,19 @@ The mortality of the passengers without an age is 10% higher than the average mo
 library(stringr)
 
 df <- df %>% mutate(Title = str_extract(Name, ",[ ]?[[:alpha:].]+") %>% str_extract(., "[[:alpha:]]+"),
-              Surname = str_extract(Name, "[[:alpha:]']+"))
+                    Surname = str_extract(Name, "[[:alpha:]']+"))
 
+TITLE <- (df$Title %>% as.factor() %>% summary) > 10
+
+for(i in names(TITLE)){
+  if(!TITLE[i]){
+    df$Title[which(df$Title == i)] <- "none"
+    }
+  }
 df$Title <- factor(df$Title)
 ```
 
-```{r featureAgegroup, message=FALSE, results='hide'}
+```{r featureAgegroup, message=FALSE, results='hide', cache=T}
 ageLev <- c(0,1,3,10,15,25,50,100)
 ageLab <- c("Infant", "Toddler", "Child", "Teenager", "Young Adult", "Mid-Aged", "Elderly")
 # split Age into age-groups
@@ -193,26 +201,64 @@ df$AgeGroup <- cut(df$Age, breaks=ageLev, labels = ageLab, ordered_result = T)
 library(nnet)
 # Single out the data were we have an Age
 df_Age <- df[which(!is.na(df$Age)),]
-# split data into train and test set
+
+############################################
+######## split data into train and test set
+######## look for a suitable model
+###########################################
 n_Row <- nrow(df_Age)
 sample_Age <- sample(n_Row, size = n_Row*0.6, replace = F)
 df_Age_train <- df_Age[sample_Age,]
 df_Age_test <- df_Age[-sample_Age,]
 #ageMod1 <- multinom(AgeGroup ~ Pclass+Parch+SibSp+Fare+Title, data = df_Age_train) # this doesnt work yet, because the feature 'Titles' has some faults
-ageMod1 <- multinom(AgeGroup ~ Pclass+Parch+SibSp+Fare+Sex, data = df_Age_train) # without the 'Title' feature
-
-#### K-Fold CV ####
+ageMod1 <- multinom(AgeGroup ~ Pclass+Parch+SibSp+Fare+Sex+Title, data = df_Age_train) # without the 'Title' feature
 
 # reduce model complexity with step()
 ageMod2 <- step(ageMod1)
+###########################################
 
-# predict new data from test set
-newY <- predict(ageMod1, newdata = df_Age_test)
-newY <- factor(newY, levels = ageLab, labels = ageLab, ordered = T)
+#######################################################################################
+##################################### K-Fold CV, with some analytics ##################
+################## fit a bunch of models and look at the true #########################
+################## positive rate for model selection##################################
+set.seed(1337)
+formulas <- c(formula(AgeGroup ~ Pclass+Parch+SibSp+Sex+Embarked+Title),
+              formula(AgeGroup ~ Pclass+Parch+SibSp+Embarked+Title),
+              formula(AgeGroup ~ Pclass+Parch+SibSp+Title),
+              formula(AgeGroup ~ Pclass+Parch+SibSp+Embarked),
+              formula(AgeGroup ~ Pclass+Parch+Title),
+              formula(AgeGroup ~ Pclass+SibSp+Title),
+              formula(AgeGroup ~ SibSp+Parch+Title),
+              formula(AgeGroup ~ Parch+Title),
+              formula(AgeGroup ~ Title),
+              formula(AgeGroup ~ Embarked))
+
+for(i in 1:length(formulas)){
+  if(i==1) out <- data.frame(model = i,
+                             true.rate = multinom0(formulas[[i]], data = df_Age, k=10)("AgeGroup"))
+  else out <- rbind(out, data.frame(model = i,
+                                    true.rate = multinom0(formulas[[i]], data = df_Age, k=10)("AgeGroup")))
+  }
+
+plot(out$model, out$true.rate, ylab="True positives", xlab="Model No.")
+out2<-out %>% group_by(model) %>% summarize(true.rate = mean(true.rate))
+points(out2$model, out2$true.rate, col="red")
+lines(out2$model, out2$true.rate, col="red")
+
+#### Random predictor perfomance
+
+for(i in 1:10000){
+  levels(df_Age$AgeGroup)[round(runif(nrow(df_Age), 1, 7))]
+  table(levels(df_Age$AgeGroup)[round(runif(nrow(df_Age), 1, 7))], df_Age$AgeGroup)
+  a<-table(levels(df_Age$AgeGroup)[round(runif(nrow(df_Age), 1, 7))], df_Age$AgeGroup)
+  if(!exists("randomAgreed")) randomAgreed <- sum(diag(a)/sum(a))
+  else randomAgreed <- append(randomAgreed, sum(diag(a)/sum(a)))
+  }
+hist(randomAgreed)
 ```
 
 
-```{r ageGroupModelAssesment}
+```{r ageGroupModelAssesment, eval=F}
 library(pROC)
 # confusion matrix
 confMat <- table(df_Age_test$AgeGroup, newY)
