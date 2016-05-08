@@ -1,0 +1,53 @@
+---
+title: "Kaggle Titanic - Prediction"
+author: "bweigel"
+date: "April 29, 2016"
+output:
+  knitrBootstrap::bootstrap_document:
+    theme.chooser: TRUE
+    highlight.chooser: TRUE
+---
+
+
+```{r knitrOptions, cache=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(message=F, error=T, warning = F, echo=F, dev='CairoSVG')
+
+library(dplyr)
+library(magrittr)
+```
+
+# Load data from the test-set #
+
+.. and convert the variables to the corresponding factors etc. for prediction
+
+```{r loadData, echo=TRUE}
+df <- read.csv("data/test.csv", stringsAsFactors = F, header=T, na.strings = "")
+
+df <- df %>% mutate(Pclass = factor(Pclass, levels = 1:3, labels = c("1st", "2nd", "3rd")),
+                    Sex = factor(Sex, levels = unique(Sex), labels = unique(Sex)),
+                    Embarked = factor(Embarked, levels = c("S", "C", "Q"), labels = c("S. Hampton", "Cherbourg", "Queenstown")))
+
+#drop cabin column because of many NAs
+df <- df %>% select(-Cabin)
+```
+
+# Logistic regression #
+
+```{r predLog, echo=TRUE}
+load("models/logMod.Rda")
+
+prediction <- predict(logMod1, newdata = df, type = "response")
+prediction <- ifelse(prediction <= 0.5, 0, 1)
+prediction <- data.frame(PassengerId = df$PassengerId, Survived = prediction)
+
+# randomly assign survived for NA rows (rows where no age was present)
+prediction$Survived[which(is.na(prediction$Survived))] <- sample(c(0,1), is.na(prediction$Survived) %>% sum, replace = T)
+write.csv(prediction, file="prediction/logRegression.csv", row.names = F)
+```
+
+# Logistic regression with AgeGroup #
+
+```{r predLog, echo=TRUE}
+
+```

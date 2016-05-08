@@ -1,0 +1,175 @@
+---
+title: "Kaggle Titanic"
+author: "bweigel"
+date: "April 29, 2016"
+output:
+  knitrBootstrap::bootstrap_document:
+    theme.chooser: TRUE
+    highlight.chooser: TRUE
+---
+
+## Feature Engineering ##
+
+```{r knitrOptions, cache=FALSE}
+library(knitr)
+opts_chunk$set(message=F, error=T, warning = F, echo=F, dev='CairoSVG')
+```
+
+```{r prerequesites}
+library(dplyr)
+library(magrittr)
+library(pROC)
+library(boot)
+library(glmnet)
+library(data.table)
+library(ggplot2)
+# function for plotting barplots according to results of an aggreate function
+# input is the same as aggregate()
+# returns a function, where the axis labels can be changed through the parameters xlab, ylab, main
+barplot0 <- function(...){
+  df <- aggregate(...)
+  return(function(main=NULL, xlab=NULL, ylab=NULL){
+    xlab <- ifelse(is.null(xlab), names(df)[1], xlab)
+    ylab <- ifelse(is.null(ylab), names(df)[2], ylab)
+    main <- ifelse(is.null(main), NA, main)
+    barplot(height = df[,2], names.arg = df[,1]%>%as.character(),  xlab = xlab, ylab=ylab)
+  })
+}
+
+
+```
+
+```{r loadDate}
+load("titanic.Rda")
+df <- df %>% select(-PassengerId)
+```
+
+
+```{r featureNames}
+library(stringr)
+
+# create new columns with features Title and Surname
+df <- df %>% mutate(Title = str_extract(Name, ",[ ]?[[:alpha:].]+") %>% str_extract(., "[[:alpha:]]+"),
+              Surname = str_extract(Name, "[[:alpha:]' -]+")) %>%
+            select(-Name)
+
+#df$Title[which(df$Title)]
+df$Title <- factor(df$Title)
+```
+
+```{r featureAgegroup, message=FALSE, results='hide', eval=FALSE}
+ageLev <- c(0,1,3,10,15,25,50,100)
+ageLab <- c("Infant", "Toddler", "Child", "Teenager", "Young Adult", "Mid-Aged", "Elderly")
+# split Age into age-groups
+df$AgeGroup <- cut(df$Age, breaks=ageLev, labels = ageLab, ordered_result = T)
+
+#barplot0(Survived ~ AgeGroup, df, mean)()
+#barplot0(Pclass ~ AgeGroup, df, mean)()
+
+#################################################
+################predict agegroup with nnet ######
+#################################################
+library(nnet)
+# Single out the data were we have an Age
+df_Age <- df[which(!is.na(df$Age)),]
+# split data into train and test set
+n_Row <- nrow(df_Age)
+sample_Age <- sample(n_Row, size = n_Row*0.6, replace = F)
+df_Age_train <- df_Age[sample_Age,]
+df_Age_test <- df_Age[-sample_Age,]
+#ageMod1 <- multinom(AgeGroup ~ Pclass+Parch+SibSp+Fare+Title, data = df_Age_train) # this doesnt work yet, because the feature 'Titles' has some faults
+ageMod1 <- multinom(AgeGroup ~ Pclass+Parch+SibSp+Fare+Sex, data = df_Age_train) # without the 'Title' feature
+
+#### K-Fold CV ####
+
+# reduce model complexity with step()
+ageMod2 <- step(ageMod1)
+
+# predict new data from test set
+newY <- predict(ageMod1, newdata = df_Age_test)
+newY <- factor(newY, levels = ageLab, labels = ageLab, ordered = T)
+```
+
+
+```{r ageGroupModelAssesment, eval=FALSE}
+library(pROC)
+# confusion matrix
+confMat <- table(df_Age_test$AgeGroup, newY)
+knitr::kable(confMat)
+# Overall Agreement of Classification
+agree <- diag(confMat)/sum(confMat)
+kable(agree)
+
+# ROC Curves
+
+ROC <- multiclass.roc(df_Age_test$AgeGroup, newY, )
+par(mfrow=c(2,2))
+lapply(ROC$rocs, FUN = plot)
+```
+
+The overall true positive rate is `r #round(sum(agree), 4)`, or `r #round(sum(agree)*100, 2)`%.
+
+```{r}
+#################################################
+################predict agegroup with glmnet ####
+#################################################
+library(glmnet)
+# Single out the data were we have an Age
+df_Age <- df[which(!is.na(df$Age)),] %>% select(-Survived, -Surname,  -Ticket, -Embarked, -Age)
+# split data into train and test set
+n_Row <- nrow(df_Age)
+sample_Age <- sample(n_Row, size = n_Row*0.6, replace = F)
+# training set
+df_Age_train <- df_Age[sample_Age,]
+xTrain <- model.matrix(AgeGroup~., df_Age_train)
+yTrain <- df_Age_train$AgeGroup %>% unlist
+
+xTrain <- model.matrix(AgeGroup~., df_Age)
+yTrain <- df_Age$AgeGroup %>% unlist
+
+#test set
+df_Age_test <- df_Age[-sample_Age,]
+xTest <- model.matrix(AgeGroup~., df_Age_test)
+yTest <- df_Age_test$AgeGroup %>% unlist
+
+# CV
+ageMod1 <- cv.glmnet(xTrain, yTrain, family = "multinomial", alpha = 1, type.multinomial="grouped")
+ageMod2 <- cv.glmnet(xTrain, yTrain, family = "multinomial", alpha = 0.5, type.multinomial="ungrouped")
+plot(ageMod1)
+# predict new data from test set
+newY <- predict(ageMod1, newx = xTest, s=ageMod2$lambda.min, type = "response")
+
+# transform prediction into required format
+NOM <- dimnames(newY)[2] %>% unlist
+newY <- apply(newY, 1, function(x){
+  tmp <- max(x)
+  tmp <- ifelse(x == tmp, T, F)
+  NOM[tmp]})
+newY <- factor(newY, levels = levels(yTrain), labels = levels(yTrain), ordered = T)
+
+# confusion matrix
+confMat <- table(newY, yTest)
+
+sum(diag(confMat))/sum(confMat)
+
+save(ageMod2, file = "models/ageMod2.Rda")
+```
+
+## Predict AgeGroup an rows were no Age is present
+
+```{r}
+df_Age <- df[which(is.na(df$Age)),] %>% select(-Survived, -Surname,  -Ticket, -Embarked, -Age)
+df_Age$AgeGroup <- 1
+xVal <- model.matrix(AgeGroup~., df_Age)
+
+newY <- predict(ageMod2, newx = df_Age, s=ageMod2$lambda.1se, type = "response")
+# transform prediction into required format
+NOM <- dimnames(newY)[2] %>% unlist
+newY <- apply(newY, 1, function(x){
+  tmp <- max(x)
+  tmp <- ifelse(x == tmp, T, F)
+  NOM[tmp]})
+newY <- factor(newY, levels = levels(yTrain), labels = levels(yTrain), ordered = T)
+```
+
+

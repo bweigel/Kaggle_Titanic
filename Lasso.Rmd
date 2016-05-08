@@ -1,0 +1,123 @@
+---
+title: "Kaggle Titanic - The Lasso"
+author: "bweigel"
+date: "April 29, 2016"
+output:
+  knitrBootstrap::bootstrap_document:
+    theme.chooser: TRUE
+    highlight.chooser: TRUE
+---
+
+
+```{r knitrOptions, cache=FALSE}
+library(knitr)
+opts_chunk$set(message=F, error=T, warning = F, echo=F, dev='CairoSVG')
+```
+
+```{r prerequesites}
+library(dplyr)
+library(magrittr)
+library(pROC)
+library(boot)
+library(glmnet)
+library(data.table)
+library(ggplot2)
+# function for plotting barplots according to results of an aggreate function
+# input is the same as aggregate()
+# returns a function, where the axis labels can be changed through the parameters xlab, ylab, main
+barplot0 <- function(...){
+  df <- aggregate(...)
+  return(function(main=NULL, xlab=NULL, ylab=NULL){
+    xlab <- ifelse(is.null(xlab), names(df)[1], xlab)
+    ylab <- ifelse(is.null(ylab), names(df)[2], ylab)
+    main <- ifelse(is.null(main), NA, main)
+    barplot(height = df[,2], names.arg = df[,1]%>%as.character(),  xlab = xlab, ylab=ylab)
+  })
+}
+```
+
+```{r loadDate}
+load("titanic.Rda")
+df <- df %>% select(-PassengerId) # no PassengerID row
+```
+
+```{r featureNames}
+library(stringr)
+
+df <- df %>% mutate(Title = str_extract(Name, ",[ ]?[[:alpha:].]+") %>% str_extract(., "[[:alpha:]]+"),
+              Surname = str_extract(Name, "[[:alpha:]']+"))
+
+df$Title <- factor(df$Title)
+```
+Let's try using the elastic net methods (Lasso-Regression) to fit our data.
+
+```{r glmNet}
+# drop NA rows
+df <- df[!(is.na(df) %>% rowSums %>% as.logical),]
+dfWork <- df %>% select(-Name, -Ticket, -Surname)
+# split into train and test set
+samples <- sample(nrow(dfWork), size = 0.6*nrow(dfWork))
+dfWork_train <- dfWork[samples,]
+dfWork_test <- dfWork[-samples,]
+
+# prepare input matrix and rsponde vector
+dataMatrix <- model.matrix(Survived~., dfWork_train )
+newX  <- model.matrix(Survived~., dfWork_test )
+#dataMatrix <- df %>% select(-Survived, -Name, -Ticket) %>% as.matrix
+Yvalues <- dfWork_train %>% select(Survived) %>% unlist %>% factor()
+
+#fit using glmnet
+glmnetMod1 <- glmnet(x = dataMatrix, y = Yvalues,
+       family="binomial", alpha=1)
+```
+
+```{r findBestLambda}
+lambda <- glmnetMod1$lambda
+valiMat <- matrix(NA, length(lambda), 3)  # this holds the true positivs
+
+# try to find the best lambda
+for(i in 1:length(lambda)){
+  pred <- predict(glmnetMod1 , s=lambda[i] , newx = newX, type="response")
+  pred <- ifelse(pred <= 0.5, F, T)
+  confMat <- table(dfWork_test$Survived, pred)
+  # correct classifications
+  valiMat[i, 1] <- sum(diag(confMat))/sum(confMat)
+  
+  valiMat[i, 2] <- tryCatch(confMat[1,2]/sum(confMat),
+                            error = function(e) NA)# false positives
+  valiMat[i, 3] <- tryCatch(confMat[2,1]/sum(confMat),
+                            error = function(e) NA)# false negatives
+}
+
+par(mfrow=c(1,1))
+# Plot correct classifications vs lambda
+plot(lambda, valiMat[,1], type="l", ylab="Correct Classifications")
+
+# Plot incorrect classifications vs lambda
+plot(lambda, valiMat[,2], type="l", col="red", ylim=c(min(valiMat[,2:3], na.rm = T),max(valiMat[,2:3], na.rm = T)), ylab="Incorrect Classifications")
+lines(lambda, valiMat[,3], col="blue")
+legend("topright", c("false pos.", "false neg."), col = c("red", "blue"), lty=1)
+```
+
+```{r}
+glmnetMod2 <- cv.glmnet(dataMatrix, Yvalues, family="binomial", alpha=1)
+plot(glmnetMod2)
+bestlam <- glmnetMod2$lambda.min
+predict ( glmnetMod2 , type ="coefficients" , s = bestlam ) 
+predict ( glmnetMod2 , type ="coefficients" , s = glmnetMod2$lambda.1se) 
+```
+
+## Predict for test-Set
+
+```{r predTestSub}
+df <- read.csv("data/test.csv", stringsAsFactors = F, header=T, na.strings = "")
+
+df <- df %>% mutate(Pclass = factor(Pclass, levels = 1:3, labels = c("1st", "2nd", "3rd")),
+                    Sex = factor(Sex, levels = unique(Sex), labels = unique(Sex)),
+                    Embarked = factor(Embarked, levels = c("S", "C", "Q"), labels = c("S. Hampton", "Cherbourg", "Queenstown")))
+
+#drop cabin column because of many NAs
+df <- df %>% select(-Cabin)
+
+```
+

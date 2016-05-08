@@ -21,6 +21,9 @@ opts_chunk$set(message=F, error=T, warning = F, echo=F, dev='CairoSVG')
 ```{r prerequesites}
 library(dplyr)
 library(magrittr)
+library(pROC)
+library(boot)
+library(glmnet)
 library(data.table)
 library(ggplot2)
 # function for plotting barplots according to results of an aggreate function
@@ -72,6 +75,7 @@ multinom0 <- function(formula, data, k, ...){
   return(outPut)
   }
 
+
 ```
 
 # The dataset #
@@ -110,7 +114,11 @@ df <- df %>% mutate(Survived = as.logical(Survived),
                     Pclass = factor(Pclass, levels = 1:3, labels = c("1st", "2nd", "3rd")),
                     Sex = factor(Sex, levels = unique(Sex), labels = unique(Sex)),
                     Embarked = factor(Embarked, levels = c("S", "C", "Q"), labels = c("S. Hampton", "Cherbourg", "Queenstown")))
-# set missing values NA
+
+#drop cabin column because of many NAs
+df <- df %>% select(-Cabin)
+#save file
+save(df, file="titanic.Rda")
 
 ```
 
@@ -168,11 +176,11 @@ df[which(is.na(df$Age)),] %>% summarise(Survived=mean(Survived),
 
 The mortality of the passengers without an age is 10% higher than the average mortality (71% vs 62%). Also it seems that passengers w/o age were mostly in the lower classes 2 and 3 (avg class 2.6), male (70%) with rather cheap tickets (22 pounds) and were travelling without parents or children.
 
-## Feature engineering ##
+# Simple logistic regression #
 
-```{r featureNames}
-library(stringr)
+At first I'll try a simple logistic regression and leave out any rows that contain `NA` values. Since the cabin column has 687 `NA` values this column was dropped before.
 
+```{r}
 df <- df %>% mutate(Title = str_extract(Name, ",[ ]?[[:alpha:].]+") %>% str_extract(., "[[:alpha:]]+"),
                     Surname = str_extract(Name, "[[:alpha:]']+"))
 
@@ -256,23 +264,74 @@ for(i in 1:10000){
   }
 hist(randomAgreed)
 ```
+  
+  
+```{r}
+#remove rows with NA values
+dfWork <- df[!(is.na(df) %>% rowSums() %>% as.logical), ]
 
+# split into train and test set
+samples <- sample(nrow(dfWork), size = 0.6*nrow(dfWork))
+dfWork_train <- dfWork[samples,]
+dfWork_test <- dfWork[-samples,]
 
-```{r ageGroupModelAssesment, eval=F}
-library(pROC)
-# confusion matrix
-confMat <- table(df_Age_test$AgeGroup, newY)
-knitr::kable(confMat)
-# Overall Agreement of Classification
-agree <- diag(confMat)/sum(confMat)
-kable(agree)
-
-# ROC Curves
-
-ROC <- multiclass.roc(df_Age_test$AgeGroup, newY, )
-par(mfrow=c(2,2))
-lapply(ROC$rocs, FUN = plot)
+# perform simple logistic regression
+logMod1 <- glm(Survived ~ ., family = binomial(link = "logit"), data = dfWork_train)
 ```
 
-The overall true positive rate is `r round(sum(agree), 4)`, or `r round(sum(agree)*100, 2)`%.
+Unsurprisingly this simple approach doesn't work. The algorithm doesn't converge.
+Let's fiddle around with the formula a bit.
 
+```{r fitLogMod}
+set.seed(1337)  
+# simpler model
+logMod1 <- glm(Survived ~ Pclass + Age + Sex + SibSp + Parch + Fare + SibSp:Age + SibSp:Pclass, family = binomial(link = "logit"), data = dfWork_train)
+
+# seems like Parch and Fare are not significant as parameters for prediction
+summary(logMod1)
+
+# simplify model using step()
+logMod2 <- step(logMod1)
+summary(logMod2)
+# as expected Parch and Fare are dropped
+
+```
+
+Now let's check the performance of our new model on te test set.
+
+<<<<<<< HEAD
+```{r ageGroupModelAssesment, eval=F}
+library(pROC)
+```
+
+```{r predictLogMod}
+# predict outcome
+newY <- predict(logMod2, newdata = dfWork_test, type = "response")
+dfAnalyze <- cbind(dfWork_test, SurvPred=newY) # this is for plotting later on
+# compare prediction and actual values in confudion table
+newY <- ifelse(newY <= 0.5, F, T)
+confMat <- table(dfWork_test$Survived, newY)
+
+knitr::kable(confMat)
+confMat <- confMat/sum(confMat)
+knitr::kable(confMat/sum(confMat))
+```
+
+This simple logistic regression model already does a reasonable well job of predicting the right outcome.
+It classifies `r round((diag(confMat) %>% sum)*100,  2) `% of all cases into the right group.
+
+```{r plotResultsLogMod}
+ggplot(dfAnalyze %>% filter(SibSp == 0), aes(x = Age, y = SurvPred, color=Pclass, shape=Sex)) + 
+  geom_point()  +
+  geom_line() +
+  labs(y="Predicted probability of Survival")
+```
+
+
+```{r glmCV}
+logMod1 <- glm(Survived ~ Sex + Age + Embarked + Fare + Pclass + Parch + SibSp, dfWork, family= binomial(link="logit"))
+logMod1 <- step(logMod1)
+save(logMod1, file="models/logMod.Rda")
+```
+
+The 5-fold cross validation error or of the model `r print(logMod1$formula)` is approximately `r cv.glm(dfWork, logMod1, K=5)$delta[1]`.
